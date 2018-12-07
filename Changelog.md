@@ -10,6 +10,7 @@ Compiler Features:
 
 
 Bugfixes:
+ * Control Flow Graph: Detect every access to uninitialized storage pointers.
 
 
 ### 0.5.1 (2018-12-03)

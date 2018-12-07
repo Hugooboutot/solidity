@@ -33,131 +33,122 @@ bool ControlFlowAnalyzer::visit(FunctionDefinition const& _function)
 	if (_function.isImplemented())
 	{
 		auto const& functionFlow = m_cfg.functionFlow(_function);
-		checkUnassignedStorageReturnValues(_function, functionFlow.entry, functionFlow.exit);
+		checkUninitializedAccess(functionFlow.entry, functionFlow.exit);
 	}
 	return false;
 }
 
-set<VariableDeclaration const*> ControlFlowAnalyzer::variablesAssignedInNode(CFGNode const *node)
+void ControlFlowAnalyzer::checkUninitializedAccess(CFGNode const* _entry, CFGNode const* _exit) const
 {
-	set<VariableDeclaration const*> result;
-	for (auto expression: node->block.expressions)
+	struct NodeInfo
 	{
-		if (auto const* assignment = dynamic_cast<Assignment const*>(expression))
+		set<VariableDeclaration const*> unassignedVariables;
+		set<VariableOccurrence const*> uninitializedVariableAccesses;
+		/// Propagate the information from another node to this node.
+		/// To be used to propagate information from a node to its exit nodes.
+		/// Returns true, if new variables were added and the current node has to
+		/// be traversed again.
+		bool propagateFrom(NodeInfo const& _entryNode)
 		{
-			stack<Expression const*> expressions;
-			expressions.push(&assignment->leftHandSide());
-			while (!expressions.empty())
-			{
-				Expression const* expression = expressions.top();
-				expressions.pop();
-
-				if (auto const *tuple = dynamic_cast<TupleExpression const*>(expression))
-					for (auto const& component: tuple->components())
-						expressions.push(component.get());
-				else if (auto const* identifier = dynamic_cast<Identifier const*>(expression))
-					if (auto const* variableDeclaration = dynamic_cast<VariableDeclaration const*>(
-						identifier->annotation().referencedDeclaration
-					))
-						result.insert(variableDeclaration);
-			}
+			size_t previousUnassignedVariables = unassignedVariables.size();
+			size_t previousUninitializedVariableAccessess = uninitializedVariableAccesses.size();
+			unassignedVariables += _entryNode.unassignedVariables;
+			uninitializedVariableAccesses += _entryNode.uninitializedVariableAccesses;
+			return
+				unassignedVariables.size() > previousUnassignedVariables ||
+				uninitializedVariableAccesses.size() > previousUninitializedVariableAccessess
+			;
 		}
-	}
-	return result;
-}
-
-void ControlFlowAnalyzer::checkUnassignedStorageReturnValues(
-	FunctionDefinition const& _function,
-	CFGNode const* _functionEntry,
-	CFGNode const* _functionExit
-) const
-{
-	if (_function.returnParameterList()->parameters().empty())
-		return;
-
-	map<CFGNode const*, set<VariableDeclaration const*>> unassigned;
-
-	{
-		auto& unassignedAtFunctionEntry = unassigned[_functionEntry];
-		for (auto const& returnParameter: _function.returnParameterList()->parameters())
-			if (
-				returnParameter->type()->dataStoredIn(DataLocation::Storage) ||
-				returnParameter->type()->category() == Type::Category::Mapping
-			)
-				unassignedAtFunctionEntry.insert(returnParameter.get());
-	}
-
+	};
+	map<CFGNode const*, NodeInfo> nodeInfos;
 	stack<CFGNode const*> nodesToTraverse;
-	nodesToTraverse.push(_functionEntry);
+	nodesToTraverse.push(_entry);
 
-	// walk all paths from entry with maximal set of unassigned return values
+	// Walk all paths starting from the nodes in ``nodesToTraverse`` until ``NodeInfo::propagateFrom``
+	// returns false for all exits, i.e. until all paths have been walked with maximal sets of unassigned
+	// variables and accesses.
 	while (!nodesToTraverse.empty())
 	{
-		auto node = nodesToTraverse.top();
+		auto currentNode = nodesToTraverse.top();
 		nodesToTraverse.pop();
 
-		auto& unassignedAtNode = unassigned[node];
-
-		if (node->block.returnStatement != nullptr)
-			if (node->block.returnStatement->expression())
-				unassignedAtNode.clear();
-		if (!unassignedAtNode.empty())
+		auto& nodeInfo = nodeInfos[currentNode];
+		for (auto const& variableOccurrence: currentNode->variableOccurrences)
 		{
-			// kill all return values to which a value is assigned
-			for (auto const* variableDeclaration: variablesAssignedInNode(node))
-				unassignedAtNode.erase(variableDeclaration);
-
-			// kill all return values referenced in inline assembly
-			// a reference is enough, checking whether there actually was an assignment might be overkill
-			for (auto assembly: node->block.inlineAssemblyStatements)
-				for (auto const& ref: assembly->annotation().externalReferences)
-					if (auto variableDeclaration = dynamic_cast<VariableDeclaration const*>(ref.second.declaration))
-						unassignedAtNode.erase(variableDeclaration);
+			switch (variableOccurrence.kind())
+			{
+				case VariableOccurrence::Kind::Assignment:
+					nodeInfo.unassignedVariables.erase(&variableOccurrence.declaration());
+					break;
+				case VariableOccurrence::Kind::InlineAssembly:
+					// We consider all variable referenced in inline assembly as assignments.
+					// So far any reference is enough, but we might want to check whether
+					// there actually was an assignment in the future.
+					nodeInfo.unassignedVariables.erase(&variableOccurrence.declaration());
+					break;
+				case VariableOccurrence::Kind::Access:
+					if (nodeInfo.unassignedVariables.count(&variableOccurrence.declaration()))
+					{
+						if (variableOccurrence.declaration().type()->dataStoredIn(DataLocation::Storage))
+							// Merely store the unassigned access. We do not generate an error right away, since this
+							// path might still always revert. It is only an error if this is propagated to the exit
+							// node of the function (i.e. there is a path with an uninitialized access).
+							nodeInfo.uninitializedVariableAccesses.insert(&variableOccurrence);
+					}
+					break;
+				case VariableOccurrence::Kind::Declaration:
+					nodeInfo.unassignedVariables.insert(&variableOccurrence.declaration());
+					break;
+			}
 		}
 
-		for (auto const& exit: node->exits)
-		{
-			auto& unassignedAtExit = unassigned[exit];
-			auto oldSize = unassignedAtExit.size();
-			unassignedAtExit.insert(unassignedAtNode.begin(), unassignedAtNode.end());
-			// (re)traverse an exit, if we are on a path with new unassigned return values to consider
-			// this will terminate, since there is only a finite number of unassigned return values
-			if (unassignedAtExit.size() > oldSize)
+		// Propagate changes to all exits and queue them for traversal, if needed.
+		for (auto const& exit: currentNode->exits)
+			if (nodeInfos[exit].propagateFrom(nodeInfo))
 				nodesToTraverse.push(exit);
-		}
 	}
 
-	if (!unassigned[_functionExit].empty())
+	auto const& exitInfo = nodeInfos[_exit];
+	if (!exitInfo.uninitializedVariableAccesses.empty())
 	{
-		vector<VariableDeclaration const*> unassignedOrdered(
-			unassigned[_functionExit].begin(),
-			unassigned[_functionExit].end()
-		);
+		vector<VariableOccurrence const*> uninitializedAccessesOrdered(
+			exitInfo.uninitializedVariableAccesses.begin(),
+			exitInfo.uninitializedVariableAccesses.end()
+		 );
 		sort(
-			unassignedOrdered.begin(),
-			unassignedOrdered.end(),
-			[](VariableDeclaration const* lhs, VariableDeclaration const* rhs) -> bool {
-				return lhs->id() < rhs->id();
+			uninitializedAccessesOrdered.begin(),
+			uninitializedAccessesOrdered.end(),
+			[](VariableOccurrence const* lhs, VariableOccurrence const* rhs) -> bool
+			{
+				if (lhs->occurrence() && rhs->occurrence())
+				{
+					if (lhs->occurrence()->id() < rhs->occurrence()->id()) return true;
+					if (rhs->occurrence()->id() < lhs->occurrence()->id()) return false;
+				}
+				else if (rhs->occurrence())
+					return true;
+				else if (lhs->occurrence())
+					return false;
+
+				if (lhs->declaration().id() < rhs->declaration().id()) return true;
+				else if (rhs->declaration().id() < lhs->declaration().id()) return false;
+				using KindCompareType = std::underlying_type<VariableOccurrence::Kind>::type;
+				return static_cast<KindCompareType>(lhs->kind()) < static_cast<KindCompareType>(rhs->kind());
 			}
 		);
-		for (auto const* returnVal: unassignedOrdered)
+
+		for (auto const* variableOccurrence: uninitializedAccessesOrdered)
 		{
 			SecondarySourceLocation ssl;
-			for (CFGNode* lastNodeBeforeExit: _functionExit->entries)
-				if (unassigned[lastNodeBeforeExit].count(returnVal))
-				{
-					if (!!lastNodeBeforeExit->block.returnStatement)
-						ssl.append("Problematic return:", lastNodeBeforeExit->block.returnStatement->location());
-					else
-						ssl.append("Problematic end of function:", _function.location());
-				}
+			if (variableOccurrence->occurrence())
+				ssl.append("The variable was declared here.", variableOccurrence->declaration().location());
 
 			m_errorReporter.typeError(
-				returnVal->location(),
+				variableOccurrence->occurrence() ?
+					variableOccurrence->occurrence()->location() :
+					variableOccurrence->declaration().location(),
 				ssl,
-				"This variable is of storage pointer type and might be returned without assignment and "
-				"could be used uninitialized. Assign the variable (potentially from itself) "
-				"to fix this error."
+				"This variable is of storage pointer type and is accessed without prior assignment."
 			);
 		}
 	}
