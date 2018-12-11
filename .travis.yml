@@ -191,9 +191,7 @@ before_script:
     - echo -n "$TRAVIS_COMMIT" > commit_hash.txt
     - test $SOLC_EMSCRIPTEN != On || (scripts/build_emscripten.sh)
     - test $SOLC_DOCKER != On || (scripts/docker_build.sh)
-    - test $SOLC_RELEASE != On || (scripts/build.sh $SOLC_BUILD_TYPE -DBoost_USE_STATIC_LIBS=OFF
-      && scripts/release.sh $ZIP_SUFFIX
-      && scripts/create_source_tarball.sh)
+    - test $SOLC_RELEASE != On || (scripts/create_source_tarball.sh)
 
 script:
     - test $SOLC_EMSCRIPTEN != On -o $SOLC_TESTS != On || (scripts/test_emscripten.sh)
@@ -227,7 +225,7 @@ deploy:
             - release
             - /^v\d/
     # This is the deploy target for the native build (Linux and macOS)
-    # which generates ZIPs per commit and the source tarball.
+    # which generates the source tarball.
     #
     # This runs for each tag that is created and adds the corresponding files.
     - provider: releases
