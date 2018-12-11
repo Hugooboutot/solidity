@@ -332,6 +332,24 @@ void ContractCompiler::appendInternalSelector(
 	}
 }
 
+namespace
+{
+
+// Helper function to check if any function is payable
+bool hasPayableFunctions(FunctionDefinition const* fallback, map<FixedHash<4>, FunctionTypePointer> const interfaceFunctions)
+{
+	if (fallback && fallback->isPayable())
+		return true;
+
+	for (auto const& it: interfaceFunctions)
+		if (it.second->isPayable())
+			return true;
+
+	return false;
+}
+
+}
+
 void ContractCompiler::appendFunctionSelector(ContractDefinition const& _contract)
 {
 	map<FixedHash<4>, FunctionTypePointer> interfaceFunctions = _contract.interfaceFunctions();
@@ -343,6 +361,12 @@ void ContractCompiler::appendFunctionSelector(ContractDefinition const& _contrac
 	}
 
 	FunctionDefinition const* fallback = _contract.fallbackFunction();
+
+	bool noPayableFunctions = !hasPayableFunctions(fallback, interfaceFunctions);
+
+	if (noPayableFunctions)
+		appendCallValueCheck();
+
 	eth::AssemblyItem notFound = m_context.newTag();
 	// directly jump to fallback if the data is too short to contain a function selector
 	// also guards against short data
@@ -364,10 +388,11 @@ void ContractCompiler::appendFunctionSelector(ContractDefinition const& _contrac
 	appendInternalSelector(callDataUnpackerEntryPoints, sortedIDs, notFound, m_optimise_runs);
 
 	m_context << notFound;
+
 	if (fallback)
 	{
 		solAssert(!_contract.isLibrary(), "");
-		if (!fallback->isPayable())
+		if (!fallback->isPayable() && !noPayableFunctions)
 			appendCallValueCheck();
 
 		solAssert(fallback->isFallback(), "");
@@ -397,7 +422,7 @@ void ContractCompiler::appendFunctionSelector(ContractDefinition const& _contrac
 		m_context.setStackOffset(0);
 		// We have to allow this for libraries, because value of the previous
 		// call is still visible in the delegatecall.
-		if (!functionType->isPayable() && !_contract.isLibrary())
+		if (!functionType->isPayable() && !_contract.isLibrary() && !noPayableFunctions)
 			appendCallValueCheck();
 
 		// Return tag is used to jump out of the function.
