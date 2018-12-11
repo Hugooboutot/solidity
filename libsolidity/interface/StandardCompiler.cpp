@@ -27,6 +27,8 @@
 #include <libdevcore/JSON.h>
 #include <libdevcore/Keccak256.h>
 
+#include <algorithm>
+
 #include <boost/algorithm/string.hpp>
 
 using namespace std;
@@ -227,12 +229,61 @@ Json::Value collectEVMObject(eth::LinkerObject const& _object, string const* _so
 
 }
 
+boost::optional<Json::Value> StandardCompiler::checkKeys(Json::Value const& _input, vector<string>& _keys)
+{
+	sort(_keys.begin(), _keys.end());
+	auto const& members = _input.getMemberNames();
+	for (auto const& member: members)
+		if (!binary_search(_keys.begin(), _keys.end(), member))
+			return formatFatalError("JSONError", "Unknown key " + member);
+	return boost::none;
+}
+
+boost::optional<Json::Value> StandardCompiler::checkRootKeys(Json::Value const& _input)
+{
+	vector<string> keys{"auxiliaryInput", "language", "settings", "sources"};
+	return checkKeys(_input, keys);
+}
+
+boost::optional<Json::Value> StandardCompiler::checkSourceKeys(Json::Value const& _input)
+{
+	vector<string> keys{"content", "keccak256", "urls"};
+	return checkKeys(_input, keys);
+}
+
+boost::optional<Json::Value> StandardCompiler::checkAuxiliaryInputKeys(Json::Value const& _input)
+{
+	vector<string> keys{"smtlib2responses"};
+	return checkKeys(_input, keys);
+}
+
+boost::optional<Json::Value> StandardCompiler::checkSettingsKeys(Json::Value const& _input)
+{
+	vector<string> keys{"evmVersion", "libraries", "metadata", "optimizer", "outputSelection", "remappings"};
+	return checkKeys(_input, keys);
+}
+
+boost::optional<Json::Value> StandardCompiler::checkOptimizerKeys(Json::Value const& _input)
+{
+	vector<string> keys{"enabled", "runs"};
+	return checkKeys(_input, keys);
+}
+
+boost::optional<Json::Value> StandardCompiler::checkMetadataKeys(Json::Value const& _input)
+{
+	vector<string> keys{"useLiteralContent"};
+	return checkKeys(_input, keys);
+}
+
 Json::Value StandardCompiler::compileInternal(Json::Value const& _input)
 {
 	m_compilerStack.reset(false);
 
 	if (!_input.isObject())
 		return formatFatalError("JSONError", "Input is not a JSON object.");
+
+	if (auto result = checkRootKeys(_input))
+		return *result;
 
 	if (_input["language"] != "Solidity")
 		return formatFatalError("JSONError", "Only \"Solidity\" is supported as a language.");
@@ -253,6 +304,9 @@ Json::Value StandardCompiler::compileInternal(Json::Value const& _input)
 
 		if (!sources[sourceName].isObject())
 			return formatFatalError("JSONError", "Source input is not a JSON object.");
+
+		if (auto result = checkSourceKeys(sources[sourceName]))
+			return *result;
 
 		if (sources[sourceName]["keccak256"].isString())
 			hash = sources[sourceName]["keccak256"].asString();
@@ -319,6 +373,10 @@ Json::Value StandardCompiler::compileInternal(Json::Value const& _input)
 	}
 
 	Json::Value const& auxInputs = _input["auxiliaryInput"];
+
+	if (auto result = checkAuxiliaryInputKeys(auxInputs))
+		return *result;
+
 	if (!!auxInputs)
 	{
 		Json::Value const& smtlib2Responses = auxInputs["smtlib2responses"];
@@ -340,6 +398,9 @@ Json::Value StandardCompiler::compileInternal(Json::Value const& _input)
 	}
 
 	Json::Value const& settings = _input.get("settings", Json::Value());
+
+	if (auto result = checkSettingsKeys(settings))
+		return *result;
 
 	if (settings.isMember("evmVersion"))
 	{
@@ -366,6 +427,10 @@ Json::Value StandardCompiler::compileInternal(Json::Value const& _input)
 	if (settings.isMember("optimizer"))
 	{
 		Json::Value optimizerSettings = settings["optimizer"];
+
+		if (auto result = checkOptimizerKeys(optimizerSettings))
+			return *result;
+
 		if (optimizerSettings.isMember("enabled"))
 		{
 			if (!optimizerSettings["enabled"].isBool())
@@ -427,6 +492,10 @@ Json::Value StandardCompiler::compileInternal(Json::Value const& _input)
 	m_compilerStack.setLibraries(libraries);
 
 	Json::Value metadataSettings = settings.get("metadata", Json::Value());
+
+	if (auto result = checkMetadataKeys(metadataSettings))
+		return *result;
+
 	m_compilerStack.useMetadataLiteralSources(metadataSettings.get("useLiteralContent", Json::Value(false)).asBool());
 
 	Json::Value outputSelection = settings.get("outputSelection", Json::Value());

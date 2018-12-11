@@ -24,6 +24,8 @@
 
 #include <libsolidity/interface/CompilerStack.h>
 
+#include <boost/optional.hpp>
+
 namespace dev
 {
 
@@ -54,6 +56,21 @@ public:
 
 private:
 	Json::Value compileInternal(Json::Value const& _input);
+
+	/// Checks whether _input has at least one member that is not in _keys.
+	boost::optional<Json::Value> checkKeys(Json::Value const& _input, std::vector<std::string>& _keys);
+	/// Checks for unknown keys in the root level object.
+	boost::optional<Json::Value> checkRootKeys(Json::Value const& _input);
+	/// Checks for unknown keys in a source object.
+	boost::optional<Json::Value> checkSourceKeys(Json::Value const& _input);
+	/// Checks for unknown keys in an auxiliaryInput object.
+	boost::optional<Json::Value> checkAuxiliaryInputKeys(Json::Value const& _input);
+	/// Checks for unknown keys in a settings object.
+	boost::optional<Json::Value> checkSettingsKeys(Json::Value const& _input);
+	/// Checks for unknown keys in an optimizer object.
+	boost::optional<Json::Value> checkOptimizerKeys(Json::Value const& _input);
+	/// Checks for unknown keys in an optimizer object.
+	boost::optional<Json::Value> checkMetadataKeys(Json::Value const& _input);
 
 	CompilerStack m_compilerStack;
 	ReadCallback::Callback m_readFile;
